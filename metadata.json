@@ -1,0 +1,5 @@
+{
+  "name": "FlowState Planner V2",
+  "description": "A dynamic day planner with integrated Pomodoro timers. Features smart scheduling that automatically adjusts subsequent tasks when you run overtime, and AI-powered task entry.",
+  "requestFramePermissions": []
+}
