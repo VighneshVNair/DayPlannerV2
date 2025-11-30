@@ -1,7 +1,18 @@
 
 import { Task } from "../types";
 
-const getApiKey = () => process.env.API_KEY;
+// Safety check for environment variables to prevent crashes in browsers (Vite/Vercel)
+// where 'process' might not be defined.
+const getApiKey = () => {
+    try {
+        if (typeof process !== 'undefined' && process.env) {
+            return process.env.API_KEY;
+        }
+    } catch (e) {
+        // Ignore reference errors
+    }
+    return undefined;
+};
 
 interface AIResponse {
     tasks: Partial<Task>[];
@@ -10,7 +21,7 @@ interface AIResponse {
 export const parseNaturalLanguagePlan = async (input: string, baseTime: number): Promise<AIResponse> => {
     const apiKey = getApiKey();
     if (!apiKey) {
-        console.warn("API_KEY not found");
+        console.warn("API_KEY not found. AI features will be disabled.");
         return { tasks: [] };
     }
 
