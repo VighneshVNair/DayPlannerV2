@@ -1,6 +1,6 @@
 
 import React, { useState, useEffect } from 'react';
-import { Settings, Task } from './types';
+import { Settings, Task, TimerData } from './types';
 import { recalculateSchedule, generateId, formatTime } from './services/scheduler';
 import { parseNaturalLanguagePlan } from './services/gemini';
 import { Timer } from './components/Timer';
@@ -15,46 +15,78 @@ const DEFAULT_SETTINGS: Settings = {
   autoStartPomodoros: false,
 };
 
+const DEFAULT_TIMER_STATE: TimerData = {
+    remainingSeconds: 25 * 60,
+    isRunning: false,
+    mode: 'pomo'
+};
+
 const COLORS = ['indigo', 'blue', 'green', 'purple', 'pink', 'orange'];
 
 // --- Smart Input Parser ---
-const parseSmartInput = (input: string, startTime: number): { title: string, duration: number } | null => {
-    const lower = input.toLowerCase();
-    
-    // 1. "until lunch" (Target 12:00 PM)
-    if (lower.includes('until lunch')) {
-        const title = input.replace(/until lunch/i, '').trim() || "Work";
+const parseSmartInput = (input: string, startTime: number): { title: string, duration?: number, anchoredStartTime?: string } => {
+    let title = input;
+    let duration: number | undefined;
+    let anchoredStartTime: string | undefined;
+
+    // 1. Check for "at [time]"
+    const atRegex = /\b(?:at|@)\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/i;
+    const atMatch = title.match(atRegex);
+    if (atMatch) {
+        let h = parseInt(atMatch[1]);
+        const m = parseInt(atMatch[2] || '0');
+        const amp = atMatch[3]?.toLowerCase();
+
+        if (amp === 'pm' && h < 12) h += 12;
+        if (amp === 'am' && h === 12) h = 0;
         
-        const start = new Date(startTime);
-        const target = new Date(startTime);
+        // Heuristic: if no AM/PM and hour is small (1-6), assume PM (e.g. "at 2" -> 14:00)
+        // unless it's clearly early morning context, but safe bet for planning is usually afternoon.
+        if (!amp && h > 0 && h <= 6) {
+             h += 12;
+        }
+
+        anchoredStartTime = `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}`;
+        title = title.replace(atMatch[0], '').trim();
+    }
+
+    // 2. Check for "until lunch"
+    if (title.toLowerCase().includes('until lunch')) {
+        let refStartMs = startTime;
+        if (anchoredStartTime) {
+             const [ah, am] = anchoredStartTime.split(':').map(Number);
+             const d = new Date(startTime);
+             d.setHours(ah, am, 0, 0);
+             refStartMs = d.getTime();
+        }
+
+        const target = new Date(refStartMs);
         target.setHours(12, 0, 0, 0); 
-        
-        let diff = (target.getTime() - start.getTime()) / 60000;
-        if (diff <= 0) return null;
-        
-        return { title, duration: Math.ceil(diff) };
+        let diff = (target.getTime() - refStartMs) / 60000;
+        if (diff > 0) {
+            duration = Math.ceil(diff);
+            title = title.replace(/until lunch/i, '').trim();
+        }
     }
 
-    // 2. "for half an hour"
+    // 3. Check for "for half an hour"
     const halfHourRegex = /for\s+half\s+(?:an\s+)?hour/i;
-    if (halfHourRegex.test(input)) {
-        const title = input.replace(halfHourRegex, '').trim() || "Task";
-        return { title, duration: 30 };
+    if (halfHourRegex.test(title)) {
+        duration = 30;
+        title = title.replace(halfHourRegex, '').trim();
     }
 
-    // 3. "for an hour"
+    // 4. Check for "for an hour"
     const anHourRegex = /for\s+(?:an?|one)\s+hour/i;
-    if (anHourRegex.test(input)) {
-        const title = input.replace(anHourRegex, '').trim() || "Task";
-        return { title, duration: 60 };
+    if (anHourRegex.test(title)) {
+        duration = 60;
+        title = title.replace(anHourRegex, '').trim();
     }
 
-    // 4. "until [time]"
+    // 5. Check for "until [time]"
     const untilRegex = /until\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
-    const untilMatch = input.match(untilRegex);
+    const untilMatch = title.match(untilRegex);
     if (untilMatch) {
-        const title = input.replace(untilMatch[0], '').trim() || "Task";
-        
         let h = parseInt(untilMatch[1]);
         const m = parseInt(untilMatch[2] || '0');
         const amp = untilMatch[3]?.toLowerCase();
@@ -62,47 +94,53 @@ const parseSmartInput = (input: string, startTime: number): { title: string, dur
         if (amp === 'pm' && h < 12) h += 12;
         if (amp === 'am' && h === 12) h = 0;
 
-        const start = new Date(startTime);
-        const currentH = start.getHours();
-        
-        // Heuristic: if AM/PM missing, infer based on start time
-        if (!amp && h < 12 && h < currentH) h += 12;
+        let refStartMs = startTime;
+        if (anchoredStartTime) {
+             const [ah, am] = anchoredStartTime.split(':').map(Number);
+             const d = new Date(startTime);
+             d.setHours(ah, am, 0, 0);
+             refStartMs = d.getTime();
+        }
 
-        const target = new Date(startTime);
+        // Basic inference if ambiguous AM/PM based on reference start
+        const refDate = new Date(refStartMs);
+        if (!amp && h < 12 && h < refDate.getHours()) h += 12;
+
+        const target = new Date(refStartMs);
         target.setHours(h, m, 0, 0);
         
-        if (target.getTime() <= start.getTime()) {
+        if (target.getTime() <= refStartMs) {
              if (!amp && h < 12) {
                  target.setHours(target.getHours() + 12);
              }
-             if (target.getTime() <= start.getTime()) {
+             if (target.getTime() <= refStartMs) {
                  target.setDate(target.getDate() + 1);
              }
         }
 
-        let diff = (target.getTime() - start.getTime()) / 60000;
+        let diff = (target.getTime() - refStartMs) / 60000;
         if (diff <= 0) diff = 15; 
 
-        return { title, duration: Math.ceil(diff) };
+        duration = Math.ceil(diff);
+        title = title.replace(untilMatch[0], '').trim();
     }
     
-    // 5. "for X min/h"
+    // 6. Check for "for X min/h"
     const durationRegex = /for\s+(\d+(?:\.\d+)?)\s*(m|min|mins|minute|minutes|h|hr|hour|hours)/i;
-    const match = input.match(durationRegex);
-    if (match) {
-        const title = input.replace(match[0], '').trim() || "Task";
-        const val = parseFloat(match[1]);
-        const unit = match[2].toLowerCase();
-        let duration = 0;
-        if (unit.startsWith('h')) {
-            duration = Math.ceil(val * 60);
-        } else {
-            duration = Math.ceil(val);
-        }
-        return { title, duration };
+    const durMatch = title.match(durationRegex);
+    if (durMatch) {
+        const val = parseFloat(durMatch[1]);
+        const unit = durMatch[2].toLowerCase();
+        const d = unit.startsWith('h') ? Math.ceil(val * 60) : Math.ceil(val);
+        duration = d;
+        title = title.replace(durMatch[0], '').trim();
     }
 
-    return null;
+    return { 
+        title: title.trim() || "Task", 
+        duration, 
+        anchoredStartTime 
+    };
 }
 
 function App() {
@@ -115,7 +153,6 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
   // Anchor time for the first task in the queue. Stabilizes reordering.
-  // This is now derived from manual input if set, or just defaults.
   const [queueStartTime, setQueueStartTime] = useState<number | undefined>(undefined);
   const [manualStartTime, setManualStartTime] = useState<string>(""); // "HH:MM"
 
@@ -158,13 +195,36 @@ function App() {
     if (tasks.length > 0) {
         updateSchedule(tasks, undefined, undefined, getEffectiveQueueStart());
     }
-  }, [currentTime, activeTaskId, manualStartTime]); // Dependencies triggering updates
+  }, [currentTime, activeTaskId, manualStartTime]); 
 
   useEffect(() => {
     if (newTaskDuration === DEFAULT_SETTINGS.pomodoroDuration) {
         setNewTaskDuration(settings.pomodoroDuration);
     }
   }, [settings.pomodoroDuration]);
+
+  // --- Background Timer Logic ---
+  useEffect(() => {
+      const interval = setInterval(() => {
+          const now = Date.now();
+          let taskCompletedId: string | null = null;
+          
+          // Check for completed timers without causing side effects inside loop
+          tasks.forEach(t => {
+              if (t.timer.isRunning && t.timer.lastStartedAt) {
+                  const elapsed = (now - t.timer.lastStartedAt) / 1000;
+                  if (t.timer.remainingSeconds - elapsed <= 0) {
+                      taskCompletedId = t.id;
+                  }
+              }
+          });
+
+          if (taskCompletedId) {
+              handleTimerFinish(taskCompletedId!);
+          }
+      }, 1000); 
+      return () => clearInterval(interval);
+  }, [tasks]);
 
   const activeTask = tasks.find(t => t.id === activeTaskId);
 
@@ -196,7 +256,8 @@ function App() {
           actualEnd, 
           activeTaskId, 
           Date.now(),
-          planStart
+          planStart,
+          selectedDate
       );
       setTasks(schedule);
   };
@@ -207,16 +268,100 @@ function App() {
       setSelectedDate(newDate);
   };
 
-  // --- Handlers ---
+  // --- Timer Handlers ---
+
+  const handleTimerFinish = (taskId: string) => {
+      const audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
+      audio.play().catch(() => {});
+
+      setTasks(prev => prev.map(t => {
+          if (t.id !== taskId) return t;
+
+          let nextMode: TimerData['mode'] = 'pomo';
+          let nextTime = settings.pomodoroDuration * 60;
+          let completedPomos = t.completedPomodoros;
+
+          if (t.timer.mode === 'pomo') {
+              completedPomos += 1;
+              nextMode = completedPomos % 4 === 0 ? 'long' : 'short';
+              nextTime = (nextMode === 'long' ? settings.longBreakDuration : settings.shortBreakDuration) * 60;
+          } else {
+              nextMode = 'pomo';
+              nextTime = settings.pomodoroDuration * 60;
+          }
+
+          const shouldAutoStart = t.timer.mode === 'pomo' ? settings.autoStartBreaks : settings.autoStartPomodoros;
+
+          return {
+              ...t,
+              completedPomodoros: completedPomos,
+              timer: {
+                  remainingSeconds: nextTime,
+                  isRunning: shouldAutoStart,
+                  mode: nextMode,
+                  lastStartedAt: shouldAutoStart ? Date.now() : undefined
+              }
+          };
+      }));
+  };
+
+  const handleToggleTimer = (taskId: string) => {
+      setTasks(prev => prev.map(t => {
+          if (t.id === taskId) {
+              if (t.timer.isRunning) {
+                  // Pause logic
+                  const elapsed = (Date.now() - (t.timer.lastStartedAt || Date.now())) / 1000;
+                  return {
+                      ...t,
+                      timer: {
+                          ...t.timer,
+                          isRunning: false,
+                          remainingSeconds: Math.max(0, t.timer.remainingSeconds - elapsed),
+                          lastStartedAt: undefined
+                      }
+                  };
+              } else {
+                  // Start logic
+                  return {
+                      ...t,
+                      timer: {
+                          ...t.timer,
+                          isRunning: true,
+                          lastStartedAt: Date.now()
+                      }
+                  };
+              }
+          } else {
+              // Pause any other running tasks (Mutual Exclusion)
+              if (t.timer.isRunning) {
+                  const elapsed = (Date.now() - (t.timer.lastStartedAt || Date.now())) / 1000;
+                  return {
+                      ...t,
+                      timer: {
+                          ...t.timer,
+                          isRunning: false,
+                          remainingSeconds: Math.max(0, t.timer.remainingSeconds - elapsed),
+                          lastStartedAt: undefined
+                      }
+                  };
+              }
+              return t;
+          }
+      }));
+  };
+
+  const handleSkipTimer = (taskId: string) => {
+      handleTimerFinish(taskId);
+  };
+
+
+  // --- Task Handlers ---
 
   const handleReorderTasks = (fromIndex: number, toIndex: number) => {
       if (fromIndex === toIndex) return;
-      
       const newTasks = [...tasks];
       const [movedTask] = newTasks.splice(fromIndex, 1);
       newTasks.splice(toIndex, 0, movedTask);
-      
-      // Pass existing queueStartTime to preserve anchor
       updateSchedule(newTasks, undefined, undefined, getEffectiveQueueStart());
   };
 
@@ -224,47 +369,31 @@ function App() {
     const now = Date.now();
     const task = tasks.find(t => t.id === taskId);
     if (!task) return;
-
     const isAlreadyCompleted = task.status === 'completed';
     const newStatus: Task['status'] = isAlreadyCompleted ? 'pending' : 'completed';
-    
     let newDuration = task.duration;
     
     if (!isAlreadyCompleted) {
          if (task.startTime <= now && isToday) {
              const elapsedMinutes = Math.ceil((now - task.startTime) / 60000);
              newDuration = Math.max(1, elapsedMinutes);
-         } else if (!isToday) {
-             // Completing a task on another day doesn't change duration based on "now", just marks done.
-         } else {
+         } else if (isToday) {
              newDuration = 0;
          }
     }
 
-    if (!isAlreadyCompleted && taskId === activeTaskId) {
-        setActiveTaskId(undefined);
-    }
+    if (!isAlreadyCompleted && taskId === activeTaskId) setActiveTaskId(undefined);
 
     const updatedTasks = tasks.map(t => 
-      t.id === taskId ? { ...t, status: newStatus, duration: newDuration } : t
+      t.id === taskId ? { 
+          ...t, 
+          status: newStatus, 
+          duration: newDuration,
+          timer: { ...t.timer, isRunning: false } // Stop timer on complete
+      } : t
     );
     
-    const nextActiveId = (!isAlreadyCompleted && taskId === activeTaskId) ? undefined : activeTaskId;
-
-    updateSchedule(
-        updatedTasks, 
-        !isAlreadyCompleted ? taskId : undefined, 
-        !isAlreadyCompleted ? now : undefined,
-        getEffectiveQueueStart()
-    );
-  };
-
-  const handlePomodoroComplete = (taskId: string) => {
-    setTasks(prev => prev.map(t => 
-        t.id === taskId 
-            ? { ...t, completedPomodoros: t.completedPomodoros + 1 } 
-            : t
-    ));
+    updateSchedule(updatedTasks, !isAlreadyCompleted ? taskId : undefined, !isAlreadyCompleted ? now : undefined, getEffectiveQueueStart());
   };
 
   const handleSelectTask = (id: string) => {
@@ -321,7 +450,8 @@ function App() {
                  expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
                  completedPomodoros: 0,
                  status: 'pending',
-                 color: selectedColor
+                 color: selectedColor,
+                 timer: { remainingSeconds: settings.pomodoroDuration * 60, isRunning: false, mode: 'pomo' }
              });
           }
       }
@@ -332,14 +462,12 @@ function App() {
     e.preventDefault();
     if (!newTaskInput.trim()) return;
 
-    // 0. Initialize Queue Start Time if Empty
     let currentQueueStart = getEffectiveQueueStart();
     if (tasks.length === 0 && !currentQueueStart && !manualStartTime) {
         currentQueueStart = Date.now();
         setQueueStartTime(currentQueueStart);
     }
 
-    // 1. Check for Bulk Import
     const importedTasks = parseBulkImport(newTaskInput);
     if (importedTasks) {
         const combinedTasks = [...tasks, ...importedTasks];
@@ -348,7 +476,6 @@ function App() {
         return;
     }
 
-    // 2. Check for Relative Insertion
     const relativeRegex = /(.+?)\s+(before|after)\s+(.+)/i;
     const relMatch = newTaskInput.match(relativeRegex);
     let insertionIndex = tasks.length;
@@ -358,34 +485,43 @@ function App() {
         const keyword = relMatch[2].toLowerCase();
         const targetNameQuery = relMatch[3].toLowerCase();
         const targetIndex = tasks.findIndex(t => t.title.toLowerCase().includes(targetNameQuery));
-        
         if (targetIndex !== -1) {
              taskDefinition = relMatch[1];
              insertionIndex = keyword === 'before' ? targetIndex : targetIndex + 1;
         }
     }
 
-    // Determine duration
-    const anchorForParse = currentQueueStart || Date.now(); // Fallback
+    const anchorForParse = currentQueueStart || Date.now(); 
     let title = taskDefinition;
     let duration = newTaskDuration;
+    let anchoredStartTime: string | undefined;
 
     const smartParsed = parseSmartInput(taskDefinition, anchorForParse);
-    if (smartParsed) {
-        title = smartParsed.title;
+    title = smartParsed.title;
+    if (smartParsed.duration) {
         duration = smartParsed.duration;
     }
+    if (smartParsed.anchoredStartTime) {
+        anchoredStartTime = smartParsed.anchoredStartTime;
+    }
+
     if (duration <= 0) duration = 15;
 
     const newTask: Task = {
         id: generateId(),
         title: title,
-        startTime: 0, // Calculated by scheduler
+        startTime: 0, 
         duration: duration,
         expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
         completedPomodoros: 0,
         status: 'pending',
-        color: selectedColor
+        color: selectedColor,
+        anchoredStartTime: anchoredStartTime,
+        timer: {
+            remainingSeconds: settings.pomodoroDuration * 60,
+            isRunning: false,
+            mode: 'pomo'
+        }
     };
     
     const newTaskList = [...tasks];
@@ -424,7 +560,12 @@ function App() {
                 completedPomodoros: 0,
                 status: 'pending',
                 notes: t.notes,
-                color: selectedColor
+                color: selectedColor,
+                timer: {
+                    remainingSeconds: settings.pomodoroDuration * 60,
+                    isRunning: false,
+                    mode: 'pomo'
+                }
             };
             currentStart += duration * 60 * 1000;
             return task;
@@ -444,7 +585,6 @@ function App() {
           const end = formatTime(t.startTime + t.duration * 60000);
           return `${start} - ${end}: ${t.title} (${t.duration}m)`;
       }).join('\n');
-      
       try {
         await navigator.clipboard.writeText(text);
         setCopyFeedback(true);
@@ -466,7 +606,7 @@ function App() {
     <div className="flex h-screen bg-slate-950 text-slate-200">
       
       {/* Sidebar */}
-      <div className="w-96 flex flex-col border-r border-slate-800 bg-slate-950/50 backdrop-blur-xl">
+      <div className="w-[48rem] flex flex-col border-r border-slate-800 bg-slate-950/50 backdrop-blur-xl">
         {/* Header */}
         <div className="p-4 border-b border-slate-800">
              <div className="flex items-center justify-between mb-4">
@@ -614,7 +754,8 @@ function App() {
              activeTask={activeTask}
              settings={settings}
              onTaskComplete={handleTaskComplete}
-             onPomodoroComplete={handlePomodoroComplete}
+             onToggleTimer={handleToggleTimer}
+             onSkipTimer={handleSkipTimer}
              totalPomosCompleted={totalPomosCompleted}
              totalPomosExpected={totalPomosExpected}
            />

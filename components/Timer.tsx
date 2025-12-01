@@ -1,13 +1,16 @@
 
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Task, TimerState, Settings } from '../types';
+import { Task, Settings } from '../types';
 import { Button } from './Button';
 
 interface TimerProps {
   activeTask: Task | undefined;
   settings: Settings;
   onTaskComplete: (taskId: string) => void;
-  onPomodoroComplete: (taskId: string) => void;
+  // New props for state lifting
+  onToggleTimer: (taskId: string) => void;
+  onSkipTimer: (taskId: string) => void;
+  
   totalPomosCompleted: number;
   totalPomosExpected: number;
 }
@@ -16,35 +19,45 @@ export const Timer: React.FC<TimerProps> = ({
   activeTask, 
   settings, 
   onTaskComplete, 
-  onPomodoroComplete,
+  onToggleTimer,
+  onSkipTimer,
   totalPomosCompleted,
   totalPomosExpected
 }) => {
-  const [timeLeft, setTimeLeft] = useState(settings.pomodoroDuration * 60);
-  const [timerState, setTimerState] = useState<TimerState>(TimerState.IDLE);
-  const [mode, setMode] = useState<'pomo' | 'short' | 'long'>('pomo');
+  const [displayTime, setDisplayTime] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  
   const containerRef = useRef<HTMLDivElement>(null);
-  
-  // High-precision timer ref
-  const endTimeRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
 
-  // Reset timer when active task ID changes
+  // --- Display Loop ---
+  // Calculates 'visual' time remaining based on the persistent task state
+  const updateDisplay = useCallback(() => {
+      if (!activeTask) return;
+      const { remainingSeconds, isRunning, lastStartedAt } = activeTask.timer;
+
+      if (isRunning && lastStartedAt) {
+          const now = Date.now();
+          const elapsed = (now - lastStartedAt) / 1000;
+          const currentRemaining = Math.max(0, remainingSeconds - elapsed);
+          setDisplayTime(currentRemaining);
+          rafRef.current = requestAnimationFrame(updateDisplay);
+      } else {
+          setDisplayTime(remainingSeconds);
+      }
+  }, [activeTask]);
+
   useEffect(() => {
-    if (activeTask) {
-      setTimerState(TimerState.IDLE);
-      setMode('pomo');
-      setTimeLeft(settings.pomodoroDuration * 60);
-      endTimeRef.current = null;
-    }
-  }, [activeTask?.id, settings.pomodoroDuration]);
+    // Start the loop whenever the task or its state changes
+    updateDisplay();
+    return () => {
+        if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    };
+  }, [updateDisplay]);
+
 
   // Handle Fullscreen Toggle
   const toggleFullscreen = async () => {
     if (!containerRef.current) return;
-
     if (!document.fullscreenElement) {
       try {
         await containerRef.current.requestFullscreen();
@@ -66,89 +79,11 @@ export const Timer: React.FC<TimerProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
-  const handleTimerFinish = useCallback(() => {
-    setTimerState(TimerState.IDLE);
-    endTimeRef.current = null;
-    
-    const audio = new Audio('https://actions.google.com/sounds/v1/alarms/beep_short.ogg');
-    audio.play().catch(() => {});
 
-    if (mode === 'pomo') {
-      if (activeTask) onPomodoroComplete(activeTask.id);
-      
-      const completed = (activeTask?.completedPomodoros || 0) + 1;
-      const nextMode = completed % 4 === 0 ? 'long' : 'short';
-      const nextDuration = nextMode === 'long' ? settings.longBreakDuration : settings.shortBreakDuration;
-      
-      setMode(nextMode);
-      setTimeLeft(nextDuration * 60);
-      
-      if (settings.autoStartBreaks) {
-        startTimer(nextDuration * 60);
-      }
-    } else {
-      setMode('pomo');
-      setTimeLeft(settings.pomodoroDuration * 60);
-      if (settings.autoStartPomodoros) {
-          startTimer(settings.pomodoroDuration * 60);
-      }
-    }
-  }, [mode, activeTask, settings, onPomodoroComplete]);
-
-  const startTimer = (durationSeconds: number) => {
-    const now = Date.now();
-    endTimeRef.current = now + (durationSeconds * 1000);
-    setTimerState(TimerState.RUNNING);
-  };
-
-  const toggleTimer = () => {
-    if (timerState === TimerState.RUNNING) {
-      // Pause
-      setTimerState(TimerState.PAUSED);
-      endTimeRef.current = null;
-    } else {
-      // Start/Resume
-      startTimer(timeLeft);
-    }
-  };
-
-  // The Tick Loop
-  useEffect(() => {
-    if (timerState !== TimerState.RUNNING) {
-        if (rafRef.current) cancelAnimationFrame(rafRef.current);
-        return;
-    }
-
-    const tick = () => {
-        if (!endTimeRef.current) return;
-        
-        const now = Date.now();
-        const remaining = Math.ceil((endTimeRef.current - now) / 1000);
-
-        if (remaining <= 0) {
-            setTimeLeft(0);
-            handleTimerFinish();
-        } else {
-            setTimeLeft(remaining);
-            rafRef.current = requestAnimationFrame(tick);
-        }
-    };
-
-    rafRef.current = requestAnimationFrame(tick);
-
-    return () => {
-        if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  }, [timerState, handleTimerFinish]);
-
-
-  const skipTimer = () => {
-    handleTimerFinish();
-  };
-
+  // --- Helper Helpers ---
   const formatTimeDisplay = (seconds: number) => {
     const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
+    const s = Math.floor(seconds % 60);
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
 
@@ -160,12 +95,11 @@ export const Timer: React.FC<TimerProps> = ({
   const hoursFocused = Math.floor(totalMinutesFocused / 60);
   const minutesFocused = totalMinutesFocused % 60;
 
-  // Determine colors based on task or mode
   const taskColor = activeTask?.color || 'indigo';
+  const mode = activeTask?.timer.mode || 'pomo';
   
   const getThemeColors = () => {
       if (mode !== 'pomo') return { text: 'text-emerald-300', bg: 'bg-emerald-500', border: 'border-emerald-500/30' };
-      // Map basic color names to tailwind classes if needed, or use inline styles if hex
       const map: Record<string, any> = {
           'indigo': { text: 'text-indigo-300', bg: 'bg-indigo-500', border: 'border-indigo-500/30' },
           'blue': { text: 'text-blue-300', bg: 'bg-blue-500', border: 'border-blue-500/30' },
@@ -201,9 +135,7 @@ export const Timer: React.FC<TimerProps> = ({
         </div>
         
         <div className="relative h-4 bg-slate-950 rounded-full overflow-hidden shadow-inner border border-slate-800">
-            {/* Background pattern */}
             <div className="absolute inset-0 opacity-20 bg-[linear-gradient(45deg,transparent_25%,rgba(255,255,255,0.05)_25%,rgba(255,255,255,0.05)_50%,transparent_50%,transparent_75%,rgba(255,255,255,0.05)_75%,rgba(255,255,255,0.05)_100%)] bg-[length:20px_20px]"></div>
-            
             <div 
                 className={`absolute top-0 left-0 h-full transition-all duration-1000 ease-out shadow-[0_0_15px_rgba(255,255,255,0.3)] ${theme.bg}`}
                 style={{ width: `${productivity}%` }}
@@ -226,17 +158,17 @@ export const Timer: React.FC<TimerProps> = ({
             <p className="text-xl font-medium text-slate-300 mb-2">Ready to Focus?</p>
             <p className="text-sm">Select a task from the list to start the timer.</p>
         </div>
-        
         {totalPomosExpected > 0 && <StatsDisplay />}
       </div>
     );
   }
 
-  const durationCurrent = mode === 'pomo' 
-      ? settings.pomodoroDuration 
-      : (mode === 'short' ? settings.shortBreakDuration : settings.longBreakDuration);
+  // Calculate progress for bar
+  const durationTotal = mode === 'pomo' 
+      ? settings.pomodoroDuration * 60
+      : (mode === 'short' ? settings.shortBreakDuration * 60 : settings.longBreakDuration * 60);
   
-  const progress = ((durationCurrent * 60 - timeLeft) / (durationCurrent * 60)) * 100;
+  const progress = Math.min(100, Math.max(0, ((durationTotal - displayTime) / durationTotal) * 100));
 
   return (
     <div 
@@ -245,7 +177,7 @@ export const Timer: React.FC<TimerProps> = ({
     >
         {/* Progress Background */}
         <div 
-            className={`absolute bottom-0 left-0 h-1 transition-all duration-1000 ease-linear z-20 ${theme.bg}`}
+            className={`absolute bottom-0 left-0 h-1 transition-all duration-200 ease-linear z-20 ${theme.bg}`}
             style={{ width: `${progress}%` }}
         />
 
@@ -253,7 +185,7 @@ export const Timer: React.FC<TimerProps> = ({
       <div className="absolute top-4 right-4 z-30">
         <button onClick={toggleFullscreen} className="text-slate-500 hover:text-white transition-colors p-2">
             {isFullscreen ? (
-                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg> // Placeholder for minimize
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg> 
             ) : (
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4" /></svg>
             )}
@@ -274,20 +206,25 @@ export const Timer: React.FC<TimerProps> = ({
       </div>
 
       <div className={`text-[120px] leading-none font-mono font-bold tracking-tighter my-8 z-10 tabular-nums drop-shadow-2xl text-slate-100`}>
-        {formatTimeDisplay(timeLeft)}
+        {formatTimeDisplay(displayTime)}
       </div>
 
       <div className="flex items-center space-x-4 z-10 mb-8">
         <Button 
-            variant={timerState === TimerState.RUNNING ? 'secondary' : 'primary'} 
+            variant={activeTask.timer.isRunning ? 'secondary' : 'primary'} 
             size="lg" 
-            onClick={toggleTimer}
-            className={`min-w-[140px] h-14 text-lg shadow-lg ${timerState !== TimerState.RUNNING ? theme.bg : ''}`}
+            onClick={() => onToggleTimer(activeTask.id)}
+            className={`min-w-[140px] h-14 text-lg shadow-lg ${!activeTask.timer.isRunning ? theme.bg : ''}`}
         >
-          {timerState === TimerState.RUNNING ? 'Pause' : 'Start'}
+          {activeTask.timer.isRunning ? 'Pause' : 'Start'}
         </Button>
         
-        <Button variant="ghost" onClick={skipTimer} title="Skip current timer" className="h-14 w-14 rounded-full border border-slate-700 hover:border-slate-500">
+        <Button 
+            variant="ghost" 
+            onClick={() => onSkipTimer(activeTask.id)} 
+            title="Skip current timer" 
+            className="h-14 w-14 rounded-full border border-slate-700 hover:border-slate-500"
+        >
            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
            </svg>
@@ -305,7 +242,6 @@ export const Timer: React.FC<TimerProps> = ({
         </Button>
       </div>
 
-      {/* Footer Stats */}
       <StatsDisplay />
     </div>
   );

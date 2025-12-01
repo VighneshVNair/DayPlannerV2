@@ -1,4 +1,11 @@
 
+export interface TimerData {
+  remainingSeconds: number;
+  isRunning: boolean;
+  lastStartedAt?: number; // Timestamp for accurate delta calculation
+  mode: 'pomo' | 'short' | 'long';
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -9,6 +16,8 @@ export interface Task {
   status: 'pending' | 'active' | 'completed';
   notes?: string;
   color?: string; // Hex code or tailwind class reference
+  anchoredStartTime?: string; // "HH:MM" 24h format
+  timer: TimerData; // Persistent timer state
 }
 
 export interface Settings {
