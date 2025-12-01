@@ -1,3 +1,4 @@
+
 export interface Task {
   id: string;
   title: string;
@@ -7,6 +8,7 @@ export interface Task {
   expectedPomodoros: number;
   status: 'pending' | 'active' | 'completed';
   notes?: string;
+  color?: string; // Hex code or tailwind class reference
 }
 
 export interface Settings {

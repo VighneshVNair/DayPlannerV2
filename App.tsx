@@ -15,6 +15,8 @@ const DEFAULT_SETTINGS: Settings = {
   autoStartPomodoros: false,
 };
 
+const COLORS = ['indigo', 'blue', 'green', 'purple', 'pink', 'orange'];
+
 // --- Smart Input Parser ---
 const parseSmartInput = (input: string, startTime: number): { title: string, duration: number } | null => {
     const lower = input.toLowerCase();
@@ -105,19 +107,46 @@ const parseSmartInput = (input: string, startTime: number): { title: string, dur
 
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [taskStore, setTaskStore] = useState<Record<string, Task[]>>({}); // { "2023-10-27": Task[] }
+  const [selectedDate, setSelectedDate] = useState<Date>(new Date());
+
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(undefined);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
   // Anchor time for the first task in the queue. Stabilizes reordering.
+  // This is now derived from manual input if set, or just defaults.
   const [queueStartTime, setQueueStartTime] = useState<number | undefined>(undefined);
+  const [manualStartTime, setManualStartTime] = useState<string>(""); // "HH:MM"
 
   const [newTaskInput, setNewTaskInput] = useState('');
   const [newTaskDuration, setNewTaskDuration] = useState(DEFAULT_SETTINGS.pomodoroDuration);
+  const [selectedColor, setSelectedColor] = useState<string>('indigo');
   
   const [isAiLoading, setIsAiLoading] = useState(false);
   const [currentTime, setCurrentTime] = useState(Date.now());
   const [copyFeedback, setCopyFeedback] = useState(false);
+
+  // --- Date Handling ---
+  const getDateKey = (date: Date) => date.toISOString().split('T')[0];
+  const currentDateKey = getDateKey(selectedDate);
+  const isToday = currentDateKey === getDateKey(new Date());
+
+  // Load tasks when date changes
+  useEffect(() => {
+    const loaded = taskStore[currentDateKey] || [];
+    setTasks(loaded);
+    // Reset active task if we switch days
+    if (!isToday) setActiveTaskId(undefined);
+  }, [currentDateKey]);
+
+  // Save tasks when they change
+  useEffect(() => {
+     setTaskStore(prev => ({
+         ...prev,
+         [currentDateKey]: tasks
+     }));
+  }, [tasks, currentDateKey]);
 
   useEffect(() => {
     const interval = setInterval(() => setCurrentTime(Date.now()), 60000);
@@ -127,9 +156,9 @@ function App() {
   // Recalculate schedule periodically
   useEffect(() => {
     if (tasks.length > 0) {
-        updateSchedule(tasks, undefined, undefined, queueStartTime);
+        updateSchedule(tasks, undefined, undefined, getEffectiveQueueStart());
     }
-  }, [currentTime, activeTaskId]); // Dependencies triggering updates
+  }, [currentTime, activeTaskId, manualStartTime]); // Dependencies triggering updates
 
   useEffect(() => {
     if (newTaskDuration === DEFAULT_SETTINGS.pomodoroDuration) {
@@ -142,9 +171,18 @@ function App() {
   // Stats calculation
   const totalPomosExpected = tasks.reduce((acc, t) => acc + t.expectedPomodoros, 0);
   const totalPomosCompleted = tasks.reduce((acc, t) => acc + t.completedPomodoros, 0);
-  // Productivity moved to Timer component visual, but data prepared here.
 
   // --- Helpers ---
+
+  const getEffectiveQueueStart = (): number | undefined => {
+      if (manualStartTime) {
+          const [h, m] = manualStartTime.split(':').map(Number);
+          const d = new Date(selectedDate);
+          d.setHours(h, m, 0, 0);
+          return d.getTime();
+      }
+      return queueStartTime;
+  };
   
   const updateSchedule = (
       currentTasks: Task[], 
@@ -158,9 +196,15 @@ function App() {
           actualEnd, 
           activeTaskId, 
           Date.now(),
-          planStart ?? queueStartTime
+          planStart
       );
       setTasks(schedule);
+  };
+
+  const handleDateChange = (offset: number) => {
+      const newDate = new Date(selectedDate);
+      newDate.setDate(selectedDate.getDate() + offset);
+      setSelectedDate(newDate);
   };
 
   // --- Handlers ---
@@ -173,7 +217,7 @@ function App() {
       newTasks.splice(toIndex, 0, movedTask);
       
       // Pass existing queueStartTime to preserve anchor
-      updateSchedule(newTasks);
+      updateSchedule(newTasks, undefined, undefined, getEffectiveQueueStart());
   };
 
   const handleTaskComplete = (taskId: string) => {
@@ -187,14 +231,11 @@ function App() {
     let newDuration = task.duration;
     
     if (!isAlreadyCompleted) {
-         // Apply duration snap if task has ostensibly started (startTime < now).
-         // This handles:
-         // 1. Active Task: Snaps end to NOW (pushes up next tasks if early, or pushes down if late).
-         // 2. Pending (but past start time): Snaps end to NOW.
-         // 3. Future Tasks: Reset duration to 0 (skipped).
-         if (task.startTime <= now) {
+         if (task.startTime <= now && isToday) {
              const elapsedMinutes = Math.ceil((now - task.startTime) / 60000);
              newDuration = Math.max(1, elapsedMinutes);
+         } else if (!isToday) {
+             // Completing a task on another day doesn't change duration based on "now", just marks done.
          } else {
              newDuration = 0;
          }
@@ -210,16 +251,12 @@ function App() {
     
     const nextActiveId = (!isAlreadyCompleted && taskId === activeTaskId) ? undefined : activeTaskId;
 
-    // Recalculate
-    const schedule = recalculateSchedule(
+    updateSchedule(
         updatedTasks, 
         !isAlreadyCompleted ? taskId : undefined, 
         !isAlreadyCompleted ? now : undefined,
-        nextActiveId,
-        now,
-        queueStartTime
+        getEffectiveQueueStart()
     );
-    setTasks(schedule);
   };
 
   const handlePomodoroComplete = (taskId: string) => {
@@ -237,18 +274,16 @@ function App() {
 
   const handleDeleteTask = (id: string) => {
       const remaining = tasks.filter(t => t.id !== id);
-      // If we delete the first task, does queue start time matter?
-      // Yes, we keep the anchor.
       if (remaining.length === 0) {
           setQueueStartTime(undefined);
           setTasks([]);
       } else {
-          updateSchedule(remaining);
+          updateSchedule(remaining, undefined, undefined, getEffectiveQueueStart());
       }
   };
   
   const handleDeleteAllTasks = () => {
-    if (window.confirm("Are you sure you want to delete all tasks?")) {
+    if (window.confirm("Are you sure you want to delete all tasks for this day?")) {
         setQueueStartTime(undefined);
         setTasks([]);
         setActiveTaskId(undefined);
@@ -264,7 +299,7 @@ function App() {
           }
           return newTask;
       });
-      updateSchedule(updatedTasks);
+      updateSchedule(updatedTasks, undefined, undefined, getEffectiveQueueStart());
   };
 
   const parseBulkImport = (input: string): Task[] | null => {
@@ -285,7 +320,8 @@ function App() {
                  startTime: 0,
                  expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
                  completedPomodoros: 0,
-                 status: 'pending'
+                 status: 'pending',
+                 color: selectedColor
              });
           }
       }
@@ -297,8 +333,8 @@ function App() {
     if (!newTaskInput.trim()) return;
 
     // 0. Initialize Queue Start Time if Empty
-    let currentQueueStart = queueStartTime;
-    if (tasks.length === 0 && !currentQueueStart) {
+    let currentQueueStart = getEffectiveQueueStart();
+    if (tasks.length === 0 && !currentQueueStart && !manualStartTime) {
         currentQueueStart = Date.now();
         setQueueStartTime(currentQueueStart);
     }
@@ -348,7 +384,8 @@ function App() {
         duration: duration,
         expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
         completedPomodoros: 0,
-        status: 'pending'
+        status: 'pending',
+        color: selectedColor
     };
     
     const newTaskList = [...tasks];
@@ -362,9 +399,8 @@ function App() {
     if (!newTaskInput.trim()) return;
     setIsAiLoading(true);
 
-    // Initialize queue start if needed
-    let currentQueueStart = queueStartTime;
-    if (tasks.length === 0 && !currentQueueStart) {
+    let currentQueueStart = getEffectiveQueueStart();
+    if (tasks.length === 0 && !currentQueueStart && !manualStartTime) {
         currentQueueStart = Date.now();
         setQueueStartTime(currentQueueStart);
     }
@@ -387,7 +423,8 @@ function App() {
                 expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
                 completedPomodoros: 0,
                 status: 'pending',
-                notes: t.notes
+                notes: t.notes,
+                color: selectedColor
             };
             currentStart += duration * 60 * 1000;
             return task;
@@ -422,7 +459,7 @@ function App() {
       if (remaining.length === 0) {
           setQueueStartTime(undefined);
       }
-      updateSchedule(remaining);
+      updateSchedule(remaining, undefined, undefined, getEffectiveQueueStart());
   };
 
   return (
@@ -430,46 +467,57 @@ function App() {
       
       {/* Sidebar */}
       <div className="w-96 flex flex-col border-r border-slate-800 bg-slate-950/50 backdrop-blur-xl">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <div className="flex flex-col">
-            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
-              FlowState
-            </h1>
-          </div>
-          <div className="flex items-center space-x-1">
-             <button
-                 onClick={handleDeleteAllTasks}
-                 className="p-2 text-slate-400 hover:text-red-400 rounded-lg hover:bg-slate-800 transition-colors"
-                 title="Delete All Tasks"
-             >
-                 <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
-             </button>
+        {/* Header */}
+        <div className="p-4 border-b border-slate-800">
+             <div className="flex items-center justify-between mb-4">
+                <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-cyan-400">
+                FlowState
+                </h1>
+                
+                <div className="flex items-center space-x-1">
+                    <button onClick={handleDeleteAllTasks} className="p-2 text-slate-400 hover:text-red-400 rounded-lg hover:bg-slate-800 transition-colors" title="Delete All">
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                    </button>
+                    <button onClick={handleCopyTasks} className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors" title="Copy">
+                        {copyFeedback ? <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>}
+                    </button>
+                    <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors" title="Settings">
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                    </button>
+                </div>
+            </div>
 
-             <button
-               onClick={handleCopyTasks}
-               className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors relative"
-               title="Copy to Clipboard"
-             >
-                {copyFeedback ? (
-                    <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg>
-                ) : (
-                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>
-                )}
-             </button>
-             
-             <button 
-                onClick={() => setIsSettingsOpen(true)}
-                className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-                title="Settings"
-             >
-                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                </svg>
-             </button>
-          </div>
+            {/* Date Nav */}
+            <div className="flex items-center justify-between mb-3 bg-slate-900 rounded-lg p-1 mx-1">
+                <button onClick={() => handleDateChange(-1)} className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+                </button>
+                <div className="text-center">
+                    <span className="block text-xs font-semibold uppercase tracking-wider text-indigo-400">
+                        {isToday ? 'Today' : selectedDate.toLocaleDateString(undefined, { weekday: 'long' })}
+                    </span>
+                    <span className="text-sm font-medium text-slate-300">
+                        {selectedDate.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}
+                    </span>
+                </div>
+                <button onClick={() => handleDateChange(1)} className="p-1 hover:bg-slate-800 rounded text-slate-400 hover:text-white">
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" /></svg>
+                </button>
+            </div>
+            
+            {/* Start Time Input */}
+            <div className="flex items-center space-x-2 mb-2 px-1">
+                <label className="text-xs text-slate-500 font-medium whitespace-nowrap">Start Plan At:</label>
+                <input 
+                    type="time" 
+                    value={manualStartTime}
+                    onChange={(e) => setManualStartTime(e.target.value)}
+                    className="bg-slate-900 border border-slate-800 text-xs rounded px-2 py-1 text-slate-300 focus:border-indigo-500 outline-none w-full"
+                />
+            </div>
         </div>
 
+        {/* List */}
         <div className="flex-1 overflow-y-auto p-4 custom-scrollbar flex flex-col">
           <TaskList 
             tasks={tasks} 
@@ -482,6 +530,7 @@ function App() {
           />
         </div>
 
+        {/* Footer Add Form */}
         <div className="p-4 border-t border-slate-800 bg-slate-900/50">
           <form onSubmit={handleAddTask} className="flex flex-col gap-2">
             <div className="flex gap-2">
@@ -495,7 +544,7 @@ function App() {
                               handleAddTask(e);
                           }
                       }}
-                      placeholder="Task, 'Import', 'Meeting before Lunch'..."
+                      placeholder="Task name..."
                       rows={1}
                       className="w-full bg-slate-800 border border-slate-700 text-sm rounded-lg pl-3 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-500 resize-none overflow-hidden min-h-[40px]"
                       style={{ height: newTaskInput.split('\n').length > 1 ? 'auto' : '40px' }}
@@ -515,15 +564,15 @@ function App() {
                     </button>
                 </div>
                 
-                <div className="relative w-24 group h-[40px]">
+                <div className="relative w-20 group h-[40px]">
                      <input 
                       type="number" 
                       value={newTaskDuration}
                       min={1}
                       onChange={(e) => setNewTaskDuration(parseInt(e.target.value) || 0)}
-                      className="w-full h-full bg-slate-800 border border-slate-700 text-sm rounded-lg pl-2 pr-8 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-500 text-center"
+                      className="w-full h-full bg-slate-800 border border-slate-700 text-sm rounded-lg pl-2 pr-6 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500 placeholder-slate-500 text-center"
                     />
-                    <span className="absolute right-2 top-2 text-xs text-slate-500 pointer-events-none">min</span>
+                    <span className="absolute right-1 top-2.5 text-[10px] text-slate-500 pointer-events-none">min</span>
                 </div>
 
                 <button 
@@ -535,10 +584,21 @@ function App() {
                 </button>
             </div>
             
-            <div className="text-[10px] text-slate-500 flex justify-between px-1">
-                <span>{Math.ceil(newTaskDuration / settings.pomodoroDuration)} pomodoros</span>
+            {/* Extended Controls: Color & Clear */}
+            <div className="flex items-center justify-between px-1">
+                <div className="flex space-x-1.5">
+                    {COLORS.map(c => (
+                        <button
+                            key={c}
+                            type="button"
+                            onClick={() => setSelectedColor(c)}
+                            className={`w-4 h-4 rounded-full transition-transform hover:scale-110 ${selectedColor === c ? 'ring-2 ring-white scale-110' : 'opacity-50 hover:opacity-100'}`}
+                            style={{ backgroundColor: `var(--color-${c}, ${c === 'indigo' ? '#6366f1' : c === 'blue' ? '#3b82f6' : c === 'green' ? '#10b981' : c === 'purple' ? '#a855f7' : c === 'pink' ? '#ec4899' : '#f97316'})` }}
+                        />
+                    ))}
+                </div>
                 {tasks.some(t => t.status === 'completed') && (
-                    <button type="button" onClick={handleClearCompleted} className="hover:text-slate-300 underline">
+                    <button type="button" onClick={handleClearCompleted} className="text-[10px] text-slate-500 hover:text-slate-300 underline">
                         Clear Done
                     </button>
                 )}
@@ -548,8 +608,8 @@ function App() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col items-center justify-center p-12 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
-        <div className="w-full max-w-2xl h-full max-h-[700px]">
+      <div className="flex-1 flex flex-col items-center justify-center p-4 sm:p-12 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
+        <div className="w-full max-w-3xl h-full max-h-[800px]">
            <Timer 
              activeTask={activeTask}
              settings={settings}
@@ -561,9 +621,9 @@ function App() {
            
            <div className="mt-8 text-center text-slate-500 text-sm max-w-lg mx-auto">
              {!activeTask ? (
-                <p>Add tasks to your plan.</p>
+                <p>Select a task to start focusing.</p>
              ) : (
-                <p>Timer is running. Click "Complete Task" when you are done to update the schedule.</p>
+                <p>Timer is running. Stay in flow.</p>
              )}
            </div>
         </div>
