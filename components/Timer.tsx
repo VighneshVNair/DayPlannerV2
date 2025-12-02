@@ -1,4 +1,3 @@
-
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Task, Settings } from '../types';
 import { Button } from './Button';
@@ -7,12 +6,11 @@ interface TimerProps {
   activeTask: Task | undefined;
   settings: Settings;
   onTaskComplete: (taskId: string) => void;
-  // New props for state lifting
   onToggleTimer: (taskId: string) => void;
   onSkipTimer: (taskId: string) => void;
-  
   totalPomosCompleted: number;
   totalPomosExpected: number;
+  onUpdateSettings: (newSettings: Settings) => void;
 }
 
 export const Timer: React.FC<TimerProps> = ({ 
@@ -22,15 +20,14 @@ export const Timer: React.FC<TimerProps> = ({
   onToggleTimer,
   onSkipTimer,
   totalPomosCompleted,
-  totalPomosExpected
+  totalPomosExpected,
+  onUpdateSettings
 }) => {
   const [displayTime, setDisplayTime] = useState(0);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const rafRef = useRef<number | null>(null);
 
-  // --- Display Loop ---
-  // Calculates 'visual' time remaining based on the persistent task state
   const updateDisplay = useCallback(() => {
       if (!activeTask) return;
       const { remainingSeconds, isRunning, lastStartedAt } = activeTask.timer;
@@ -47,15 +44,12 @@ export const Timer: React.FC<TimerProps> = ({
   }, [activeTask]);
 
   useEffect(() => {
-    // Start the loop whenever the task or its state changes
     updateDisplay();
     return () => {
         if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, [updateDisplay]);
 
-
-  // Handle Fullscreen Toggle
   const toggleFullscreen = async () => {
     if (!containerRef.current) return;
     if (!document.fullscreenElement) {
@@ -79,8 +73,6 @@ export const Timer: React.FC<TimerProps> = ({
     return () => document.removeEventListener('fullscreenchange', handleFsChange);
   }, []);
 
-
-  // --- Helper Helpers ---
   const formatTimeDisplay = (seconds: number) => {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60);
@@ -113,7 +105,64 @@ export const Timer: React.FC<TimerProps> = ({
 
   const theme = getThemeColors();
 
-  // Shared Stats Section
+  const SettingsToolbar = () => {
+    const adjustValue = (key: keyof Settings, delta: number) => {
+        const current = settings[key] as number;
+        const next = Math.max(5, current + delta); // Minimum 5 mins
+        onUpdateSettings({ ...settings, [key]: next });
+    };
+
+    const Control = ({ label, value, field }: { label: string, value: number, field: keyof Settings }) => (
+        <div className="flex flex-col items-center gap-2">
+            <span className="text-slate-400 font-bold uppercase tracking-wider text-[10px]">{label}</span>
+            <div className="flex items-center bg-black/40 rounded-2xl border border-white/10 overflow-hidden shadow-lg">
+                <button 
+                    onClick={() => adjustValue(field, -5)}
+                    className="w-12 h-12 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-colors active:bg-white/20"
+                >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M20 12H4" /></svg>
+                </button>
+                <div className="w-16 h-12 flex items-center justify-center border-x border-white/5 bg-white/5">
+                    <span className="text-2xl font-mono text-white font-bold">{value}</span>
+                </div>
+                <button 
+                    onClick={() => adjustValue(field, 5)}
+                    className="w-12 h-12 flex items-center justify-center text-slate-400 hover:text-white hover:bg-white/10 transition-colors active:bg-white/20"
+                >
+                    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" /></svg>
+                </button>
+            </div>
+        </div>
+    );
+
+    return (
+      <div className="flex items-center justify-center gap-6 bg-black/30 p-6 rounded-3xl mb-8 text-sm z-30 flex-wrap shadow-2xl border border-white/10 backdrop-blur-md">
+          <Control label="Focus" value={settings.pomodoroDuration} field="pomodoroDuration" />
+          <Control label="Short Break" value={settings.shortBreakDuration} field="shortBreakDuration" />
+          <Control label="Long Break" value={settings.longBreakDuration} field="longBreakDuration" />
+          
+          <div className="w-px h-16 bg-white/10 mx-4 hidden sm:block"></div>
+          
+          <div className="flex flex-col gap-3">
+            <button 
+                onClick={() => onUpdateSettings({...settings, autoStartPomodoros: !settings.autoStartPomodoros})}
+                className={`px-5 py-2.5 rounded-xl transition-all font-bold text-xs uppercase tracking-wide border ${settings.autoStartPomodoros ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-500/30' : 'bg-white/5 text-slate-400 border-white/5 hover:bg-white/10'}`}
+                title="Auto-start Pomodoros"
+            >
+                Auto Focus
+            </button>
+             <button 
+                onClick={() => onUpdateSettings({...settings, autoStartBreaks: !settings.autoStartBreaks})}
+                className={`px-5 py-2.5 rounded-xl transition-all font-bold text-xs uppercase tracking-wide border ${settings.autoStartBreaks ? 'bg-indigo-600 text-white border-indigo-500 shadow-lg shadow-indigo-500/30' : 'bg-white/5 text-slate-400 border-white/5 hover:bg-white/10'}`}
+                title="Auto-start Breaks"
+            >
+                Auto Break
+            </button>
+          </div>
+      </div>
+    );
+  };
+
   const StatsDisplay = () => (
       <div className="w-full mt-auto pt-6 border-t border-slate-800/50 z-10">
         <div className="flex items-end justify-between mb-3">
@@ -149,6 +198,9 @@ export const Timer: React.FC<TimerProps> = ({
   if (!activeTask) {
     return (
       <div className="flex flex-col items-center justify-between bg-slate-900 rounded-2xl p-8 shadow-xl border border-slate-800 w-full h-full min-h-[500px]">
+        {/* Settings Toolbar embedded in empty state too */}
+        <SettingsToolbar />
+        
         <div className="flex-1 flex flex-col items-center justify-center text-slate-500 w-full">
             <div className="p-6 rounded-full bg-slate-800/50 mb-6 border-2 border-dashed border-slate-700">
                 <svg className="w-12 h-12 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -163,7 +215,6 @@ export const Timer: React.FC<TimerProps> = ({
     );
   }
 
-  // Calculate progress for bar
   const durationTotal = mode === 'pomo' 
       ? settings.pomodoroDuration * 60
       : (mode === 'short' ? settings.shortBreakDuration * 60 : settings.longBreakDuration * 60);
@@ -173,7 +224,10 @@ export const Timer: React.FC<TimerProps> = ({
   return (
     <div 
         ref={containerRef}
-        className={`flex flex-col items-center justify-between bg-slate-900 p-8 shadow-xl border border-slate-800 relative overflow-hidden transition-all duration-300 ${isFullscreen ? 'fixed inset-0 z-50 rounded-none' : 'rounded-2xl w-full h-full min-h-[500px]'}`}
+        className={`flex flex-col items-center bg-slate-900 p-8 shadow-xl border border-slate-800 relative overflow-hidden transition-all duration-300 
+        ${isFullscreen 
+            ? 'fixed inset-0 z-50 rounded-none justify-center gap-12' 
+            : 'rounded-2xl w-full h-full min-h-[500px] justify-between'}`}
     >
         {/* Progress Background */}
         <div 
@@ -182,8 +236,8 @@ export const Timer: React.FC<TimerProps> = ({
         />
 
       {/* Top Controls */}
-      <div className="absolute top-4 right-4 z-30">
-        <button onClick={toggleFullscreen} className="text-slate-500 hover:text-white transition-colors p-2">
+      <div className="absolute top-4 right-4 z-30 flex items-center space-x-2">
+        <button onClick={toggleFullscreen} className="text-slate-500 hover:text-white transition-colors p-2" title="Toggle Fullscreen">
             {isFullscreen ? (
                 <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg> 
             ) : (
@@ -192,57 +246,70 @@ export const Timer: React.FC<TimerProps> = ({
         </button>
       </div>
 
-      <div className="text-center space-y-2 mb-4 z-10 w-full pt-4">
-        <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold tracking-wider uppercase transition-colors bg-opacity-20 ${theme.text} bg-slate-700`}>
-          {mode === 'pomo' ? 'Focus Time' : mode === 'short' ? 'Short Break' : 'Long Break'}
-        </span>
-        <h2 className={`text-3xl font-bold text-white truncate max-w-2xl mx-auto leading-tight py-2`}>
-            {activeTask.title}
-        </h2>
-        <div className="flex items-center justify-center space-x-2 text-slate-400 text-sm">
-            <span className="bg-slate-800 px-2 py-0.5 rounded text-xs font-mono">{activeTask.completedPomodoros}/{activeTask.expectedPomodoros}</span>
-            <span>Pomodoros Completed</span>
-        </div>
-      </div>
+      {/* Embedded Settings (Hidden in Fullscreen) */}
+      {!isFullscreen && (
+          <div className="absolute top-4 left-4 z-30">
+            <SettingsToolbar />
+          </div>
+      )}
 
-      <div className={`text-[120px] leading-none font-mono font-bold tracking-tighter my-8 z-10 tabular-nums drop-shadow-2xl text-slate-100`}>
+      {!isFullscreen && (
+        <div className="text-center space-y-2 mb-4 z-10 w-full pt-24">
+            <span className={`inline-block px-3 py-1 rounded-full text-xs font-semibold tracking-wider uppercase transition-colors bg-opacity-20 ${theme.text} bg-slate-700`}>
+            {mode === 'pomo' ? 'Focus Time' : mode === 'short' ? 'Short Break' : 'Long Break'}
+            </span>
+            <h2 className={`text-3xl font-bold text-white truncate max-w-2xl mx-auto leading-tight py-2`}>
+                {activeTask.title}
+            </h2>
+            <div className="flex items-center justify-center space-x-2 text-slate-400 text-sm">
+                <span className="bg-slate-800 px-2 py-0.5 rounded text-xs font-mono">{activeTask.completedPomodoros}/{activeTask.expectedPomodoros}</span>
+                <span>Pomodoros Completed</span>
+            </div>
+        </div>
+      )}
+
+      <div className={`${isFullscreen ? 'text-[250px]' : 'text-[120px]'} leading-none font-mono font-bold tracking-tighter z-10 tabular-nums drop-shadow-2xl text-slate-100 transition-all duration-300 ${isFullscreen ? '' : 'my-8'}`}>
         {formatTimeDisplay(displayTime)}
       </div>
 
-      <div className="flex items-center space-x-4 z-10 mb-8">
+      <div className={`flex items-center space-x-4 z-10 ${isFullscreen ? '' : 'mb-8'}`}>
         <Button 
             variant={activeTask.timer.isRunning ? 'secondary' : 'primary'} 
             size="lg" 
             onClick={() => onToggleTimer(activeTask.id)}
-            className={`min-w-[140px] h-14 text-lg shadow-lg ${!activeTask.timer.isRunning ? theme.bg : ''}`}
+            className={`min-w-[140px] h-14 text-lg shadow-lg ${!activeTask.timer.isRunning ? theme.bg : ''} ${isFullscreen ? 'scale-150 transform' : ''}`}
         >
           {activeTask.timer.isRunning ? 'Pause' : 'Start'}
         </Button>
         
-        <Button 
-            variant="ghost" 
-            onClick={() => onSkipTimer(activeTask.id)} 
-            title="Skip current timer" 
-            className="h-14 w-14 rounded-full border border-slate-700 hover:border-slate-500"
-        >
-           <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
-           </svg>
-        </Button>
+        {!isFullscreen && (
+            <>
+                <Button 
+                    variant="ghost" 
+                    onClick={() => onSkipTimer(activeTask.id)} 
+                    title="Skip current timer" 
+                    className="h-14 w-14 rounded-full border border-slate-700 hover:border-slate-500"
+                >
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                </svg>
+                </Button>
 
-        <div className="w-px h-10 bg-slate-700 mx-4"></div>
+                <div className="w-px h-10 bg-slate-700 mx-4"></div>
 
-        <Button 
-            variant="success" 
-            size="lg" 
-            onClick={() => onTaskComplete(activeTask.id)} 
-            className="h-14 shadow-lg shadow-emerald-500/10"
-        >
-           Complete Task
-        </Button>
+                <Button 
+                    variant="success" 
+                    size="lg" 
+                    onClick={() => onTaskComplete(activeTask.id)} 
+                    className="h-14 shadow-lg shadow-emerald-500/10"
+                >
+                Complete Task
+                </Button>
+            </>
+        )}
       </div>
 
-      <StatsDisplay />
+      {!isFullscreen && <StatsDisplay />}
     </div>
   );
 };

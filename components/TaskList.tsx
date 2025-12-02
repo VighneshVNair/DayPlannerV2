@@ -1,7 +1,6 @@
 
 import React, { useState, useRef, useEffect } from 'react';
 import { Task } from '../types';
-import { formatTime } from '../services/scheduler';
 
 interface TaskListProps {
   tasks: Task[];
@@ -14,6 +13,12 @@ interface TaskListProps {
 }
 
 const COLORS = ['indigo', 'blue', 'green', 'purple', 'pink', 'orange'];
+
+// Helper to convert timestamp to "HH:MM" (24h) for input value
+const timestampToInput = (ts: number) => {
+  const d = new Date(ts);
+  return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+};
 
 export const TaskList: React.FC<TaskListProps> = ({ 
   tasks, 
@@ -147,7 +152,10 @@ export const TaskList: React.FC<TaskListProps> = ({
             className={`
               group relative flex items-center p-3 transition-all duration-200 
               ${containerClasses}
-              ${isAnchored ? 'rounded-tr-sm rounded-br-[2rem] border-r-[4px] border-r-slate-600 border-double shadow-lg' : 'rounded-r-xl'}
+              ${isAnchored 
+                  ? 'rounded-tl-2xl rounded-br-2xl rounded-tr-none rounded-bl-none border-l-[6px] border-l-white/20 border-double shadow-lg ml-2' 
+                  : 'rounded-r-xl'
+              }
               ${isCompleted ? '' : 'cursor-pointer'}
               ${isLate ? 'ring-2 ring-red-500/50 shadow-[0_0_15px_rgba(220,38,38,0.2)]' : ''}
               ${draggedIndex === index ? 'opacity-40 border-dashed border-slate-600' : ''}
@@ -203,20 +211,48 @@ export const TaskList: React.FC<TaskListProps> = ({
                 </button>
              </div>
 
-            {/* Time Column */}
-            <div className="flex flex-col items-center mr-4 min-w-[60px]">
-              <div className="flex items-center gap-1">
-                 {isAnchored && !isEditing && (
+            {/* Time Column (Editable) */}
+            <div className="flex flex-col items-center mr-4 min-w-[60px]" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-1 group/time">
+                 {isAnchored && (
                      <svg className="w-3 h-3 text-indigo-400" fill="currentColor" viewBox="0 0 20 20"><path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" /></svg>
                  )}
-                 <span className={`text-xs font-mono ${isActive ? 'text-white font-bold' : isAnchored ? 'text-indigo-300 font-medium' : 'text-slate-400'}`}>
-                    {formatTime(task.startTime)}
-                 </span>
+                 <input 
+                    type="time" 
+                    value={timestampToInput(task.startTime)}
+                    onChange={(e) => {
+                        // Setting start time -> Anchors the task
+                        const val = e.target.value;
+                        if(val) onUpdateTask(task.id, { anchoredStartTime: val });
+                    }}
+                    className={`bg-transparent text-xs font-mono w-[60px] text-center focus:outline-none focus:bg-black/20 rounded cursor-pointer ${isActive ? 'text-white font-bold' : isAnchored ? 'text-indigo-300 font-medium' : 'text-slate-400'}`}
+                 />
               </div>
+              
               <div className={`w-px h-4 my-1 ${isAnchored ? 'bg-indigo-500/50' : 'bg-white/10'}`}></div>
-              <span className="text-xs font-mono text-slate-500">
-                {formatTime(endTime)}
-              </span>
+              
+              <div className="group/time">
+                 <input 
+                    type="time" 
+                    value={timestampToInput(endTime)}
+                    onChange={(e) => {
+                        // Setting end time -> Adjusts Duration
+                        const val = e.target.value;
+                        if(!val) return;
+                        const [h, m] = val.split(':').map(Number);
+                        const startDate = new Date(task.startTime);
+                        const endDate = new Date(task.startTime);
+                        endDate.setHours(h, m, 0, 0);
+                        
+                        let diffMs = endDate.getTime() - startDate.getTime();
+                        if (diffMs < 0) diffMs += 24 * 60 * 60 * 1000; // Handle midnight wrap
+                        
+                        const newDuration = Math.round(diffMs / 60000);
+                        if(newDuration > 0) onUpdateTask(task.id, { duration: newDuration });
+                    }}
+                    className="bg-transparent text-xs font-mono text-slate-500 w-[60px] text-center focus:outline-none focus:bg-black/20 rounded cursor-pointer"
+                 />
+              </div>
             </div>
 
             {/* Task Info */}
@@ -251,7 +287,7 @@ export const TaskList: React.FC<TaskListProps> = ({
                               ))}
                           </div>
                           
-                          {/* Anchor Control */}
+                          {/* Anchor Control (Redundant but kept for explicit remove) */}
                           <div className="flex items-center space-x-2 bg-slate-800/50 rounded px-2 py-0.5 border border-slate-700">
                              <span className="text-[10px] text-slate-400 font-medium">Anchor:</span>
                              <input 
@@ -275,7 +311,7 @@ export const TaskList: React.FC<TaskListProps> = ({
                     <h3 
                         onClick={(e) => startEditing(e, task)}
                         className={`font-medium truncate flex-1 hover:text-white transition-colors ${isCompleted ? 'line-through text-slate-500' : 'text-slate-100'}`}
-                        title="Click to edit details or set anchor"
+                        title="Click to edit details"
                     >
                         {task.title}
                     </h3>

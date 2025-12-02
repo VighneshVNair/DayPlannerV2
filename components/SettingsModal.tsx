@@ -1,3 +1,4 @@
+
 import React from 'react';
 import { Settings } from '../types';
 import { Button } from './Button';
@@ -59,6 +60,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose, s
               className={`w-11 h-6 flex items-center rounded-full transition-colors ${tempSettings.autoStartBreaks ? 'bg-indigo-600' : 'bg-slate-700'}`}
             >
               <span className={`w-4 h-4 rounded-full bg-white transform transition-transform ml-1 ${tempSettings.autoStartBreaks ? 'translate-x-5' : ''}`} />
+            </button>
+          </div>
+
+          <div className="flex items-center justify-between pt-2">
+            <span className="text-sm font-medium text-slate-400">Auto-start Pomodoros</span>
+            <button 
+              onClick={() => setTempSettings({...tempSettings, autoStartPomodoros: !tempSettings.autoStartPomodoros})}
+              className={`w-11 h-6 flex items-center rounded-full transition-colors ${tempSettings.autoStartPomodoros ? 'bg-indigo-600' : 'bg-slate-700'}`}
+            >
+              <span className={`w-4 h-4 rounded-full bg-white transform transition-transform ml-1 ${tempSettings.autoStartPomodoros ? 'translate-x-5' : ''}`} />
             </button>
           </div>
         </div>

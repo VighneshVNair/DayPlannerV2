@@ -1,11 +1,9 @@
-
 import React, { useState, useEffect } from 'react';
 import { Settings, Task, TimerData } from './types';
 import { recalculateSchedule, generateId, formatTime } from './services/scheduler';
 import { parseNaturalLanguagePlan } from './services/gemini';
 import { Timer } from './components/Timer';
 import { TaskList } from './components/TaskList';
-import { SettingsModal } from './components/SettingsModal';
 
 const DEFAULT_SETTINGS: Settings = {
   pomodoroDuration: 25,
@@ -40,8 +38,6 @@ const parseSmartInput = (input: string, startTime: number): { title: string, dur
         if (amp === 'pm' && h < 12) h += 12;
         if (amp === 'am' && h === 12) h = 0;
         
-        // Heuristic: if no AM/PM and hour is small (1-6), assume PM (e.g. "at 2" -> 14:00)
-        // unless it's clearly early morning context, but safe bet for planning is usually afternoon.
         if (!amp && h > 0 && h <= 6) {
              h += 12;
         }
@@ -102,7 +98,6 @@ const parseSmartInput = (input: string, startTime: number): { title: string, dur
              refStartMs = d.getTime();
         }
 
-        // Basic inference if ambiguous AM/PM based on reference start
         const refDate = new Date(refStartMs);
         if (!amp && h < 12 && h < refDate.getHours()) h += 12;
 
@@ -145,19 +140,17 @@ const parseSmartInput = (input: string, startTime: number): { title: string, dur
 
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [taskStore, setTaskStore] = useState<Record<string, Task[]>>({}); // { "2023-10-27": Task[] }
+  const [taskStore, setTaskStore] = useState<Record<string, Task[]>>({}); 
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
 
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(undefined);
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   
-  // Anchor time for the first task in the queue. Stabilizes reordering.
   const [queueStartTime, setQueueStartTime] = useState<number | undefined>(undefined);
-  const [manualStartTime, setManualStartTime] = useState<string>(""); // "HH:MM"
+  const [manualStartTime, setManualStartTime] = useState<string>(""); 
 
   const [newTaskInput, setNewTaskInput] = useState('');
-  const [newTaskDuration, setNewTaskDuration] = useState(DEFAULT_SETTINGS.pomodoroDuration);
+  const [newTaskDuration, setNewTaskDuration] = useState(DEFAULT_SETTINGS.pomodoroDuration + DEFAULT_SETTINGS.shortBreakDuration);
   const [selectedColor, setSelectedColor] = useState<string>('indigo');
   
   const [isAiLoading, setIsAiLoading] = useState(false);
@@ -169,20 +162,14 @@ function App() {
   const currentDateKey = getDateKey(selectedDate);
   const isToday = currentDateKey === getDateKey(new Date());
 
-  // Load tasks when date changes
   useEffect(() => {
     const loaded = taskStore[currentDateKey] || [];
     setTasks(loaded);
-    // Reset active task if we switch days
     if (!isToday) setActiveTaskId(undefined);
   }, [currentDateKey]);
 
-  // Save tasks when they change
   useEffect(() => {
-     setTaskStore(prev => ({
-         ...prev,
-         [currentDateKey]: tasks
-     }));
+     setTaskStore(prev => ({ ...prev, [currentDateKey]: tasks }));
   }, [tasks, currentDateKey]);
 
   useEffect(() => {
@@ -190,18 +177,18 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  // Recalculate schedule periodically
   useEffect(() => {
     if (tasks.length > 0) {
         updateSchedule(tasks, undefined, undefined, getEffectiveQueueStart());
     }
   }, [currentTime, activeTaskId, manualStartTime]); 
 
+  // Update default task duration when settings change
   useEffect(() => {
-    if (newTaskDuration === DEFAULT_SETTINGS.pomodoroDuration) {
-        setNewTaskDuration(settings.pomodoroDuration);
-    }
-  }, [settings.pomodoroDuration]);
+      // Logic: Default duration = 1 cycle (Pomo + Break)
+      const cycleTime = settings.pomodoroDuration + settings.shortBreakDuration;
+      setNewTaskDuration(cycleTime);
+  }, [settings.pomodoroDuration, settings.shortBreakDuration]);
 
   // --- Background Timer Logic ---
   useEffect(() => {
@@ -209,7 +196,6 @@ function App() {
           const now = Date.now();
           let taskCompletedId: string | null = null;
           
-          // Check for completed timers without causing side effects inside loop
           tasks.forEach(t => {
               if (t.timer.isRunning && t.timer.lastStartedAt) {
                   const elapsed = (now - t.timer.lastStartedAt) / 1000;
@@ -227,12 +213,16 @@ function App() {
   }, [tasks]);
 
   const activeTask = tasks.find(t => t.id === activeTaskId);
-
-  // Stats calculation
   const totalPomosExpected = tasks.reduce((acc, t) => acc + t.expectedPomodoros, 0);
   const totalPomosCompleted = tasks.reduce((acc, t) => acc + t.completedPomodoros, 0);
 
   // --- Helpers ---
+
+  const calculateExpectedPomos = (minutes: number) => {
+      const cycleTime = settings.pomodoroDuration + settings.shortBreakDuration;
+      // Conservative calculation: How many full/partial cycles fit?
+      return Math.ceil(minutes / cycleTime);
+  };
 
   const getEffectiveQueueStart = (): number | undefined => {
       if (manualStartTime) {
@@ -266,6 +256,10 @@ function App() {
       const newDate = new Date(selectedDate);
       newDate.setDate(selectedDate.getDate() + offset);
       setSelectedDate(newDate);
+  };
+
+  const handleUpdateSettings = (newSettings: Settings) => {
+      setSettings(newSettings);
   };
 
   // --- Timer Handlers ---
@@ -309,7 +303,6 @@ function App() {
       setTasks(prev => prev.map(t => {
           if (t.id === taskId) {
               if (t.timer.isRunning) {
-                  // Pause logic
                   const elapsed = (Date.now() - (t.timer.lastStartedAt || Date.now())) / 1000;
                   return {
                       ...t,
@@ -321,7 +314,6 @@ function App() {
                       }
                   };
               } else {
-                  // Start logic
                   return {
                       ...t,
                       timer: {
@@ -332,7 +324,6 @@ function App() {
                   };
               }
           } else {
-              // Pause any other running tasks (Mutual Exclusion)
               if (t.timer.isRunning) {
                   const elapsed = (Date.now() - (t.timer.lastStartedAt || Date.now())) / 1000;
                   return {
@@ -389,7 +380,7 @@ function App() {
           ...t, 
           status: newStatus, 
           duration: newDuration,
-          timer: { ...t.timer, isRunning: false } // Stop timer on complete
+          timer: { ...t.timer, isRunning: false } 
       } : t
     );
     
@@ -424,7 +415,7 @@ function App() {
           if (t.id !== id) return t;
           const newTask = { ...t, ...updates };
           if (updates.duration) {
-              newTask.expectedPomodoros = Math.ceil(updates.duration / settings.pomodoroDuration);
+              newTask.expectedPomodoros = calculateExpectedPomos(updates.duration);
           }
           return newTask;
       });
@@ -447,7 +438,7 @@ function App() {
                  title,
                  duration,
                  startTime: 0,
-                 expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
+                 expectedPomodoros: calculateExpectedPomos(duration),
                  completedPomodoros: 0,
                  status: 'pending',
                  color: selectedColor,
@@ -512,7 +503,7 @@ function App() {
         title: title,
         startTime: 0, 
         duration: duration,
-        expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
+        expectedPomodoros: calculateExpectedPomos(duration),
         completedPomodoros: 0,
         status: 'pending',
         color: selectedColor,
@@ -550,13 +541,13 @@ function App() {
         
         let currentStart = baseTime;
         const newTasks: Task[] = aiTasks.map(t => {
-            const duration = t.duration || settings.pomodoroDuration;
+            const duration = t.duration || (settings.pomodoroDuration + settings.shortBreakDuration);
             const task: Task = {
                 id: generateId(),
                 title: t.title || "Untitled Task",
                 startTime: currentStart,
                 duration: duration,
-                expectedPomodoros: Math.ceil(duration / settings.pomodoroDuration),
+                expectedPomodoros: calculateExpectedPomos(duration),
                 completedPomodoros: 0,
                 status: 'pending',
                 notes: t.notes,
@@ -620,9 +611,6 @@ function App() {
                     </button>
                     <button onClick={handleCopyTasks} className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors" title="Copy">
                         {copyFeedback ? <svg className="w-5 h-5 text-emerald-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" /></svg> : <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 5H6a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M8 5a2 2 0 002 2h2a2 2 0 002-2M8 5a2 2 0 012-2h2a2 2 0 012 2m0 0h2a2 2 0 012 2v3m2 4H10m0 0l3-3m-3 3l3 3" /></svg>}
-                    </button>
-                    <button onClick={() => setIsSettingsOpen(true)} className="p-2 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors" title="Settings">
-                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
                     </button>
                 </div>
             </div>
@@ -758,6 +746,7 @@ function App() {
              onSkipTimer={handleSkipTimer}
              totalPomosCompleted={totalPomosCompleted}
              totalPomosExpected={totalPomosExpected}
+             onUpdateSettings={handleUpdateSettings}
            />
            
            <div className="mt-8 text-center text-slate-500 text-sm max-w-lg mx-auto">
@@ -769,13 +758,6 @@ function App() {
            </div>
         </div>
       </div>
-
-      <SettingsModal 
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        settings={settings}
-        onSave={setSettings}
-      />
     </div>
   );
 }
